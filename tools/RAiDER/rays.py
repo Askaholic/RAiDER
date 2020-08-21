@@ -4,18 +4,19 @@
 #  Author: Jeremy Maurer
 #  Copyright 2020. ALL RIGHTS RESERVED.
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 from abc import ABC, abstractmethod
-from RAiDER.constants import Zenith, Slant
-from RAiDER.utilFcns import gdal_open, sind, cosd
+
+from RAiDER.constants import Slant, Zenith
+from RAiDER.losreader import read_ESA_Orbit_file
+from RAiDER.utilFcns import cosd, gdal_open, sind
 
 
 class Points():
     ''' A class object to store point locations '''
     def __init__(self, llh):
-        self.lats = None 
-        self.lons = None 
-        self.hgts = None 
+        self.lats = None
+        self.lons = None
+        self.hgts = None
 
     def setLLH(self, llh):
         self.lats = llh[...,0]
@@ -35,7 +36,7 @@ class Points():
 class LookVector(ABC):
     ''' A base class for RADAR look vectors '''
     def __init__(self):
-        self.points = None  #TODO: should this be "points" or lat/lon/hgt separately? 
+        self.points = None  #TODO: should this be "points" or lat/lon/hgt separately?
         self.vectors = None #TODO: vectors should be in earth-centered, earth-fixed reference frame, but "points" are in LLH
         self._proj = None
 
@@ -44,9 +45,9 @@ class LookVector(ABC):
         pass
 
     def setPoints(self, lats, lons, hgts):
-        self.lats = lats 
-        self.lons = lons 
-        self.hgts = hgts 
+        self.lats = lats
+        self.lons = lons
+        self.hgts = hgts
 
     def transform(self, new_proj):
         pass # TODO: implement this base class method
@@ -97,7 +98,7 @@ class RasterReader(Reader):
     def __init__(self):
         Reader.__init__(self)
 
-    def _read(self, filename)
+    def _read(self, filename):
         inc, hd = [f for f in gdal_open(filename)]
         east = sind(inc) * cosd(hd + 90)
         north = sind(inc) * sind(hd + 90)
@@ -110,21 +111,21 @@ class RasterReader(Reader):
             up = up.flatten()
         if east.shape != self.lats.flatten().shape:
             raise ValueError(
-                'The number or shape of the input LOS vectors is different ' 
+                'The number or shape of the input LOS vectors is different '
                 'from the ground pixels, please check  your inputs'
             )
 
         # Convert unit vectors to Earth-centered, earth-fixed
         if self.lats is not None:
             self.lv = enu2ecef(
-                east, 
-                north, 
-                up, 
-                self.lats, 
-                self.lons, 
+                east,
+                north,
+                up,
+                self.lats,
+                self.lons,
                 self.hgts
             )
-        else: 
+        else:
             raise ValueError(
                 'You need to assign pixel locations. Use <self>.setLLH(llh)'
             )
@@ -137,10 +138,10 @@ class OrbitFileReader(Reader):
     def __init__(self, llh, filename):
         Reader.__init__(self, llh)
 
-    def _read(self, filename)
+    def _read(self, filename):
         svs = read_ESA_Orbit_file(filename)
         self.lv = state_to_los(svs, self.lats, self.lons, self.hgts)
- 
+
 
 def zenithLookVectors(llh):
     '''
@@ -160,42 +161,6 @@ def zenithLookVectors(llh):
     u = np.sin(np.radians(lats))
 
     return np.array((e, n, u)).T
-
-
-def read_ESA_Orbit_file(filename, time=None):
-    '''
-    Read orbit data from an orbit file supplied by ESA
-    '''
-    tree = ET.parse(filename)
-    root = tree.getroot()
-    data_block = root[1]
-    numOSV = len(data_block[0])
-
-    t = np.ones(numOSV)
-    x = np.ones(numOSV)
-    y = np.ones(numOSV)
-    z = np.ones(numOSV)
-    vx = np.ones(numOSV)
-    vy = np.ones(numOSV)
-    vz = np.ones(numOSV)
-
-    for i, st in enumerate(data_block[0]):
-        t[i] = (datetime.datetime.strptime(st[1].text, 'UTC=%Y-%m-%dT%H:%M:%S.%f') - datetime.datetime(1970, 1, 1)).total_seconds()
-        x[i] = float(st[4].text)
-        y[i] = float(st[5].text)
-        z[i] = float(st[6].text)
-        vx[i] = float(st[7].text)
-        vy[i] = float(st[8].text)
-        vz[i] = float(st[9].text)
-
-    # Get the reference time
-    if time is not None:
-        time = (time - datetime.datetime(1970, 1, 1)).total_seconds()
-        time = time - t[0]
-
-    t = t - t[0]
-
-    return [t, x, y, z, vx, vy, vz]
 
 
 def state_to_los(svs, lats, lons, heights):
@@ -259,14 +224,12 @@ def getLookVectors(look_vecs, llh):
     Returns unit look vectors for each query point specified as a lat/lon/height.
     Inputs:
         look_vecs    - Can be a Zenith object, a two-band file containing line-of-
-                       sight vectors (inclination, heading), or an ESA orbit file 
-                       for the time period of interest. 
+                       sight vectors (inclination, heading), or an ESA orbit file
+                       for the time period of interest.
         llh          - latitude, longitude, heights for the query points
 
-    Returns: 
-        Unit look vectors pointing from each ground point towards the sensor or 
+    Returns:
+        Unit look vectors pointing from each ground point towards the sensor or
         Zenith
     '''
     pass
-    
-
