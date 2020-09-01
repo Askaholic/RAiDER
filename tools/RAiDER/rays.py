@@ -11,8 +11,10 @@ from abc import ABC, abstractmethod
 from typing import NamedTuple
 
 from RAiDER import Geo2rdr
-from RAiDER.constants import Zenith, _ZREF
-from RAiDER.losreader import read_ESA_Orbit_file, read_shelve, read_txt_file
+from RAiDER.constants import Zenith
+from RAiDER.losreader import (
+    read_ESA_Orbit_file, read_los_file, read_shelve, read_txt_file
+)
 from RAiDER.utilFcns import cosd, enu2ecef, gdal_open, lla2ecef, sind
 
 '''
@@ -34,8 +36,9 @@ class LVGenerator(ABC):
         """
         Generate look vectors for a set of locations
 
-        :param llh: 3d numpy array of pixel locations in llh coordinates.
-        :return: 3d numpy array of look vectors at teach location.
+        :param llh: 3d numpy array of pixel locations in LLA coordinates.
+        :return: 3d numpy array of unit look vectors at each location in ECEF
+            coordinates.
         """
         ...
 
@@ -69,7 +72,6 @@ class ZenithLVGenerator(LVGenerator):
         '''
         lats = llh[..., 0]
         lons = llh[..., 1]
-        hgts = llh[..., 2]
 
         e = np.cos(np.radians(lats)) * np.cos(np.radians(lons))
         n = np.cos(np.radians(lats)) * np.sin(np.radians(lons))
@@ -94,7 +96,7 @@ class OrbitLVGenerator(LVGenerator):
 
     def __init__(self, states):
         """
-        states  -
+        states  - Orbital state vectors
         """
         self.states = states
 
@@ -129,7 +131,6 @@ class OrbitLVGenerator(LVGenerator):
             lon_start, lat_start = np.radians(360 - lon), np.radians(lat)
             geo2rdr_obj.set_geo_coordinate(
                 np.radians(lon),
-                np.radians(lon),
                 np.radians(lat),
                 1, 1,
                 height_array
@@ -148,76 +149,6 @@ class OrbitLVGenerator(LVGenerator):
         return los, lengths
 
 
-class IHLVGenerator(LVGenerator):
-    """Generate look vectors from incidence and heading information"""
-
-    def __init__(self, incidence, heading, zref, ranges=None):
-        """
-        incidence  -
-        heading    -
-        zref       - float, integration height in meters
-        ranges     -
-        """
-        assert incidence.shape == heading.shape, \
-            "Incidence and heading must have the same shape!"
-        self.incidence = incidence
-        self.heading = heading
-        self.zref = zref
-        self.ranges = ranges
-
-    def generate(self, llh):
-        """
-        Convert incidence and heading to line-of-sight vectors from the ground
-        to the top of the troposphere.
-
-        *NOTE*:
-        LOS here is defined in an Earth-centered, earth-referenced
-        coordinate system as pointing from the ground pixel to the sensor,
-        truncating at the top of the troposphere.
-
-        Algorithm referenced from http://earthdef.caltech.edu/boards/4/topics/327
-        """
-        lats, lons, heights = llh[..., 0], llh[..., 1], llh[..., 2]
-        a_0 = self.incidence
-        a_1 = self.heading
-        ranges = self.ranges
-        zref = self.zref
-
-        if self.incidence.shape != heights.shape:
-            raise ValueError(
-                "Incidence/heading values had wrong shape! Incidence shape "
-                "{} Heading shape {} coordinate shape {}".format(
-                    self.incidence.shape,
-                    self.heading.shape,
-                    heights.shape
-                )
-            )
-
-        east = sind(a_0) * cosd(a_1 + 90)
-        north = sind(a_0) * sind(a_1 + 90)
-        up = cosd(a_0)
-        east, north, up = np.stack((east, north, up))
-
-        # Pick reasonable range to top of troposphere if not provided
-        if ranges is None:
-            ranges = (zref - heights) / up
-        # slant_range = ranges = (zref - heights) / utilFcns.cosd(inc)
-
-        # Scale look vectors by range
-        east, north, up = np.stack((east, north, up)) * ranges
-
-        xyz = enu2ecef(
-            east.ravel(), north.ravel(), up.ravel(), lats.ravel(),
-            lons.ravel(), heights.ravel()
-        )
-
-        sp_xyz = lla2ecef(lats.ravel(), lons.ravel(), heights.ravel())
-        los = np.stack(xyz, axis=-1) - np.stack(sp_xyz, axis=-1)
-        los = los.reshape(east.shape + (3,))
-
-        return los
-
-
 def getLookVectors(los_mode, llh):
     '''
     Returns unit look vectors for each query point specified as a lat/lon/height.
@@ -234,6 +165,21 @@ def getLookVectors(los_mode, llh):
     if los_mode is None:
         los_mode = Zenith
 
+    # TODO: This method of passing in the los mode is really ugly
+    if los_mode is not Zenith and los_mode[0] == "los":
+        # We already have state vectors so we just need to transform them into
+        # the right coordinate system
+        a_0, a_1 = read_los_file(los_mode[1])
+        los = incidence_heading_to_los(a_0, a_1)
+        if los.shape != llh.shape[:-1]:
+            raise ValueError(
+                "Incidence/heading values had wrong shape! Incidence/heading "
+                "shape {}, coordinate shape {}".format(
+                    los.shape, llh.shape[:-1]
+                )
+            )
+        return los
+
     gen = get_lv_generator(los_mode)
     look_vectors = gen.generate(llh)
 
@@ -245,12 +191,28 @@ def getLookVectors(los_mode, llh):
     return look_vectors
 
 
+def incidence_heading_to_los(a_0, a_1):
+    """
+    Convert incidence-heading information into unit vectors in ECEF coordinates.
+    """
+    assert a_0.shape == a_1.shape, "Incompatible dimensions!"
+
+    east = sind(a_0) * cosd(a_1 + 90)
+    north = sind(a_0) * sind(a_1 + 90)
+    up = cosd(a_0)
+
+    return np.stack((east, north, up), axis=-1)
+
+
 def get_lv_generator(los_mode):
+    """
+    Convert los_mode to a look vector generator.
+
+    TODO: Really this should be done much higher up in the call chain.
+    """
     if los_mode is Zenith:
         return ZenithLVGenerator()
 
-    # TODO: Do we actually need this type flag here or is it always
-    # unambiguous from the file extension?
     los_type, filepath = los_mode
 
     if los_type == "sv":
@@ -265,13 +227,4 @@ def get_lv_generator(los_mode):
         states = reader_func(filepath)
         return OrbitLVGenerator(states)
 
-    if los_type == "los":
-        # Using incidence and heading information
-        incidence, heading = [f.flatten() for f in gdal_open(filepath)]
-        if incidence.shape != heading.shape:
-            raise ValueError(
-                "Malformed los file. Incidence shape {} and heading shape {} "
-                "do not match!".format(incidence.shape, heading.shape)
-            )
-
-        return IHLVGenerator(incidence, heading)
+    raise ValueError("los_type '{}' is not supported!".format(los_type))
